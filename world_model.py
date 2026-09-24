@@ -1,29 +1,29 @@
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import OneHotCategorical,kl_divergence
 
 from config import *
 from encoder import Encoder
-from decoder import Decoder
-from heads import RewardHead,ContinueHead
+from heads import RewardHead,ContinueHead,Predictor
 from utils.symlog import TwoHot
 from rssm import RSSM
 
 cfg=Config()
 class WorldModel(nn.Module):
-    def __init__(self,hidden_dim=cfg.hidden_dim,a_dim=cfg.action_dim,groups=cfg.groups,classes=cfg.classes,
+    def __init__(self,hidden_dim=cfg.hidden_dim,a_dim=cfg.action_dim,pred_width=cfg.pred_width,groups=cfg.groups,classes=cfg.classes,
                  out_channels=cfg.out_channels,hidden_head=cfg.hidden_head):
         super(WorldModel, self).__init__()
-        self.s_dim=cfg.groups*cfg.classes
-        self.latent_dim=cfg.hidden_dim+self.s_dim
+        self.s_dim=groups*classes
+        self.latent_dim=hidden_dim+self.s_dim
         self.groups=groups
         self.classes=classes
 
         self.encoder=Encoder(out_channels=out_channels)
         self.embed_dim=self.encoder.embed_dim
-        self.decoder=Decoder(latent_dim=self.latent_dim)
         self.rssm=RSSM(a_dim=a_dim,s_dim=self.s_dim,hidden_dim=hidden_dim,
                        embed_dim=self.embed_dim,groups=self.groups,classes=self.classes)
+        self.predictor=Predictor(hidden_dim,pred_width,self.embed_dim)
         self.reward_head=RewardHead(latent_dim=self.latent_dim,hidden_dim=hidden_head)
         self.continue_head=ContinueHead(latent_dim=self.latent_dim,hidden_dim=hidden_head)
 
@@ -58,6 +58,7 @@ class WorldModel(nn.Module):
             prior_probs.append(prior_prob)
 
         h_seq=torch.stack(h_list,dim=1)
+        pred_embed=self.predictor(h_seq)
         s_seq=torch.stack(s_list,dim=1)
         posterior_probs_seq=torch.stack(posterior_probs,dim=1)
         prior_probs_seq=torch.stack(prior_probs,dim=1)
@@ -65,7 +66,6 @@ class WorldModel(nn.Module):
         latent_seq=torch.cat([h_seq,s_seq],dim=-1)
         latent_flat=latent_seq.reshape(B*T,self.latent_dim)
 
-        obs_recon=self.decoder(latent_flat).reshape(B,T,3,64,64)
         reward_pred=self.reward_head(latent_flat).reshape(B,T,255)
         continue_pred=self.continue_head(latent_flat).reshape(B,T,1)
 
@@ -75,7 +75,8 @@ class WorldModel(nn.Module):
             's_seq':s_seq,
             'posterior_probs':posterior_probs_seq,
             'prior_probs':prior_probs_seq,
-            'obs_recon':obs_recon,
+            'embed_seq':embed_seq,
+            'pred_embed':pred_embed,
             'reward_pred':reward_pred,
             'continue_pred':continue_pred,
 
@@ -83,11 +84,17 @@ class WorldModel(nn.Module):
 
     def compute_loss(self,obs_seq,action_seq,reward_seq,continue_seq):
         out=self.observe(obs_seq,action_seq)
-        B=obs_seq.shape[0]
-        T=action_seq.shape[1]
-        #Prediction Loss
-        obs_target=obs_seq[:,:T].float().permute(0,1,4,2,3)/255.0
-        recon_loss=F.mse_loss(out['obs_recon'],obs_target)
+
+        #CDP LOSS
+        y=out['embed_seq'].detach()
+        cos_sim=F.cosine_similarity(y,out['pred_embed'],dim=-1)
+        cos_sim=cos_sim[:,1:]
+        cos_mean=cos_sim.mean()
+        baseline = F.cosine_similarity(y, y.mean(dim=(0, 1), keepdim=True), dim=-1)[:, 1:].mean()
+        skill=(cos_mean-baseline).detach()
+        cdp_loss=-cos_mean
+
+
 
         reward_target=self.twohot.encode(reward_seq)
         log_prob=F.log_softmax(out['reward_pred'],dim=-1)
@@ -113,16 +120,19 @@ class WorldModel(nn.Module):
         kl_dyn=torch.clamp(kl_dyn,min=cfg.free_bits).sum(-1).mean()
         kl_rep=torch.clamp(kl_rep,min=cfg.free_bits).sum(-1).mean()
 
-        total_loss=cfg.beta_pred*(recon_loss+reward_loss+continue_loss) \
+        total_loss=cfg.beta_pred*(reward_loss+continue_loss)+cfg.beta_cdp*cdp_loss\
             +cfg.beta_dyn*kl_dyn+cfg.beta_rep*kl_rep
 
         return {
-            'recon_loss':recon_loss,
+            'cdp_loss':cdp_loss,
+            'cos_mean':cos_mean,
             'reward_loss':reward_loss,
             'continue_loss':continue_loss,
             'kl_dyn':kl_dyn,
             'kl_rep':kl_rep,
             'total_loss':total_loss,
+            'baseline':baseline,
+            'skill':skill,
         }
 
 
