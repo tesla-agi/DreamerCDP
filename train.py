@@ -18,6 +18,7 @@ cfg=Config()
 
 wm=WorldModel(hidden_dim=cfg.hidden_dim,
               a_dim=cfg.action_dim,
+              pred_width=cfg.pred_width,
               groups=cfg.groups,
               classes=cfg.classes,
               hidden_head=cfg.hidden_head
@@ -40,7 +41,17 @@ buffer=ReplayBuffer(obs_shape=(64,64,3),max_episodes=cfg.max_episodes,max_steps=
 
 env=gym.make("CrafterReward-v1")
 
-wm_opt=torch.optim.Adam(wm.parameters(),lr=cfg.wm_lr)
+wm_opt = torch.optim.Adam([
+    {"params": wm.encoder.parameters(),"lr": cfg.enc_lr},
+    {"params": [*wm.rssm.parameters(), *wm.predictor.parameters()],"lr": cfg.rssm_p_lr},
+    {"params": [*wm.reward_head.parameters(), *wm.continue_head.parameters()],"lr": cfg.rw_cn_lr},
+])
+
+sizes = [sum(p.numel() for p in g["params"]) for g in wm_opt.param_groups]
+print("param groups:", sizes, "total:", sum(sizes))
+assert sizes == [1_551_312, 11_618_992, 2_044_256], sizes
+assert sum(sizes) == sum(p.numel() for p in wm.parameters()), "a parameter is missing from the optimizer"
+
 a_opt=torch.optim.Adam(actor.parameters(),lr=cfg.a_lr)
 c_opt=torch.optim.Adam(critic.parameters(),lr=cfg.c_lr)
 
@@ -144,16 +155,20 @@ def train(total_steps=cfg.total_steps,warmup_episodes=cfg.warmup_episodes,
 
     return returns_log
 
-if __name__=="__main__":
-    import numpy as np
-    returns_log=train(total_steps=5000)
 
-    n=len(returns_log)
-    if n>=5:
-        print("\n" + "="*40)
-        print(f"episodes collected: {n}")
+if __name__ == "__main__":
+    import numpy as np
+    returns_log, env_steps, n_updates = train(total_steps=5000)
+
+    ratio = n_updates * cfg.batch_size * cfg.seq_len / max(env_steps, 1)
+    n = len(returns_log)
+    print("\n" + "=" * 40)
+    print(f"env steps:          {env_steps:,}")
+    print(f"updates:            {n_updates:,}")
+    print(f"effective ratio:    {ratio:.1f}   (expect ~{cfg.training_ratio})")
+    print(f"episodes collected: {n}")
+    if n >= 5:
         print(f"first-fifth mean return: {np.mean(returns_log[:n//5]):.2f}")
         print(f"last-fifth mean return:  {np.mean(returns_log[n//5*4:]):.2f}")
-        print(f"overall mean return:     {np.mean(returns_log):.2f}")
         print(f"best episode return:     {max(returns_log):.2f}")
-        print("="*40)
+    print("=" * 40)

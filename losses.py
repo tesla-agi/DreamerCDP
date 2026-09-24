@@ -50,7 +50,7 @@ if __name__ == "__main__":
     for p in target_critic.parameters():
         p.requires_grad_(False)
 
-    H, B = cfg.imagine_horizon, 16
+    H, B = cfg.horizon, 16
     rollout = {
         'h_seq': torch.randn(H, B, cfg.hidden_dim),
         's_seq': torch.randn(H, B, cfg.s_dim),
