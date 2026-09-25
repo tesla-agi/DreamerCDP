@@ -27,12 +27,10 @@ class ReplayBuffer:
         )
 
         self.num_episodes=0
+        self.write_idx=0
 
     def add_episode(self,obs_list,action_list,reward_list,done_list=None):
-        if self.num_episodes>=self.max_episodes:
-            print("\nEPISODE LIMIT")
-            return
-        idx=self.num_episodes
+        idx=self.write_idx
         T=len(action_list)
         if done_list is None:
             self.continue_pred[idx,:T]=1.0
@@ -44,7 +42,8 @@ class ReplayBuffer:
         self.actions[idx,:T]=np.array(action_list,dtype=np.int64)
         self.rewards[idx,:T]=np.array(reward_list,dtype=np.float32)
         self.episode_lengths[idx]=T
-        self.num_episodes+=1
+        self.write_idx=(self.write_idx+1)%self.max_episodes
+        self.num_episodes=min(self.num_episodes+1,self.max_episodes)
 
     def sample_sequence(self,batch_size=50,seq_len=50):
         obs_batch=np.zeros(
@@ -107,3 +106,12 @@ class ReplayBuffer:
         return self.num_episodes
 
 
+if __name__ == "__main__":
+    buf = ReplayBuffer(obs_shape=(2, 2, 3), max_episodes=3, max_steps=10)
+    for ep in range(5):
+        T = 10
+        obs = [np.full((2, 2, 3), ep, dtype=np.uint8)] * (T + 1)
+        buf.add_episode(obs, [0] * T, [float(ep)] * T, [False] * T)
+    print("num_episodes:", buf.num_episodes, " (expect 3)")
+    print("write_idx:   ", buf.write_idx, " (expect 2)")
+    print("slot rewards:", buf.rewards[:, 0], " (expect [3. 4. 2.])")
