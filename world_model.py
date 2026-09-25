@@ -96,11 +96,11 @@ class WorldModel(nn.Module):
 
 
 
-        reward_target=self.twohot.encode(reward_seq)
-        log_prob=F.log_softmax(out['reward_pred'],dim=-1)
+        reward_target=self.twohot.encode(reward_seq[:,:-1])
+        log_prob=F.log_softmax(out['reward_pred'][:,1:],dim=-1)
         reward_loss=-(reward_target*log_prob).sum(-1).mean()
 
-        continue_loss=F.binary_cross_entropy_with_logits(out['continue_pred'],continue_seq)
+        continue_loss=F.binary_cross_entropy_with_logits(out['continue_pred'][:,1:],continue_seq[:,:-1])
 
         post=out['posterior_probs']
         prior=out['prior_probs']

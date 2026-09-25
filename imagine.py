@@ -57,7 +57,7 @@ def lambda_returns(rewards,values,continue_,gamma=cfg.gamma,lam=cfg.lam):
     returns=[None]*H
     returns[H-1]=values[H-1]
     for t in range(H-2,-1,-1):
-        returns[t]=rewards[t]+gamma*continue_[t]*((1-lam)*values[t+1]+lam*returns[t+1])
+        returns[t]=rewards[t+1]+gamma*continue_[t+1]*((1-lam)*values[t+1]+lam*returns[t+1])
 
     return torch.stack(returns,dim=0)
 
