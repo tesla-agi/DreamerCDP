@@ -10,6 +10,16 @@ from utils.symlog import TwoHot
 from rssm import RSSM
 
 cfg=Config()
+
+@torch.no_grad()
+def effective_rank(z):
+    z=z.reshape(-1,z.shape[-1]).float().cpu()
+    z=z-z.mean(dim=0,keepdim=True)
+    s=torch.linalg.svdvals(z)
+    p=s/s.sum()
+    p=p[p>0]
+    return torch.exp(-(p*p.log()).sum()).item()
+
 class WorldModel(nn.Module):
     def __init__(self,hidden_dim=cfg.hidden_dim,a_dim=cfg.action_dim,pred_width=cfg.pred_width,groups=cfg.groups,classes=cfg.classes,
                  out_channels=cfg.out_channels,hidden_head=cfg.hidden_head):
@@ -133,7 +143,9 @@ class WorldModel(nn.Module):
             'total_loss':total_loss,
             'baseline':baseline,
             'skill':skill,
+            'embed':y
         }
+
 
 
 if __name__ == "__main__":
@@ -150,6 +162,9 @@ if __name__ == "__main__":
     losses = wm.compute_loss(obs, act, rew, cont)
     print("=" * 60)
     for k, v in losses.items():
+        if k == 'embed':
+            print(f"{'erank':14s} {effective_rank(v[:, 1:]):9.4f}  (must be <= {B * (T - 1)})")
+            continue
         print(f"{k:14s} {v.item():9.4f}  finite: {torch.isfinite(v).item()}")
 
     # 2. where the cdp gradient goes

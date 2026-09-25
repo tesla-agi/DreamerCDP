@@ -5,7 +5,7 @@ import os
 import gym
 import crafter
 
-from world_model import WorldModel
+from world_model import WorldModel,effective_rank
 from actor import Actor
 from critic import Critic,update_target
 from replay_buffer import ReplayBuffer
@@ -165,7 +165,9 @@ def train(total_steps=cfg.total_steps,warmup_episodes=cfg.warmup_episodes):
                       f"rew {wm_losses['reward_loss'].item():.3f} | "
                       f"kl {wm_losses['kl_dyn'].item():.1f} | "
                       f"L_a {L_actor.item():.3f} | L_c {L_critic.item():.3f} | "
-                      f"ret {ret:.1f}")
+                      f"ret {ret:.1f} |"
+                      f"erank {effective_rank(wm_losses['embed'][:, 1:]):.1f} ")
+
 
             if n_updates % cfg.save_every == 0:
                 save_checkpoint()
@@ -176,7 +178,7 @@ def train(total_steps=cfg.total_steps,warmup_episodes=cfg.warmup_episodes):
 
 if __name__ == "__main__":
     import numpy as np
-    returns_log, env_steps, n_updates = train(total_steps=5000)
+    returns_log, env_steps, n_updates = train(total_steps=50_000)
 
     ratio = n_updates * cfg.batch_size * cfg.seq_len / max(env_steps, 1)
     n = len(returns_log)
