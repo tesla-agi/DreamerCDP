@@ -136,3 +136,51 @@ class WorldModel(nn.Module):
         }
 
 
+if __name__ == "__main__":
+    torch.manual_seed(0)
+    wm = WorldModel()
+    B, T = 4, 10
+
+    obs  = torch.randint(0, 256, (B, T, 64, 64, 3), dtype=torch.uint8)
+    act  = F.one_hot(torch.randint(0, cfg.action_dim, (B, T)), cfg.action_dim).float()
+    rew  = torch.randn(B, T)
+    cont = torch.ones(B, T, 1)
+
+    # 1. every value is finite
+    losses = wm.compute_loss(obs, act, rew, cont)
+    print("=" * 60)
+    for k, v in losses.items():
+        print(f"{k:14s} {v.item():9.4f}  finite: {torch.isfinite(v).item()}")
+
+    # 2. where the cdp gradient goes
+    print("=" * 60)
+    wm.zero_grad()
+    losses['cdp_loss'].backward()
+    has = lambda m: any(p.grad is not None and p.grad.abs().sum() > 0 for p in m.parameters())
+    print("cdp -> predictor:  ", has(wm.predictor), "  (expect True)")
+    print("cdp -> rssm:       ", has(wm.rssm), "  (expect True)")
+    print("cdp -> encoder:    ", has(wm.encoder), "  (expect True, via s_t -> h_{t+1})")
+    print("cdp -> reward head:", has(wm.reward_head), " (expect False)")
+
+    # 3. alignment: h[:, t] must not have seen frame t
+    print("=" * 60)
+    obs2 = obs.clone()
+    obs2[:, 5] = 255 - obs2[:, 5]
+    with torch.no_grad():
+        torch.manual_seed(1); a = wm.observe(obs,  act)
+        torch.manual_seed(1); b = wm.observe(obs2, act)
+    print("h[:,5] unchanged:  ", torch.allclose(a['h_seq'][:, 5], b['h_seq'][:, 5]), "  (expect True)")
+    print("post[:,5] changed: ", not torch.allclose(a['posterior_probs'][:, 5], b['posterior_probs'][:, 5]), "  (expect True)")
+    print("s[:,5] changed:    ", not torch.allclose(a['s_seq'][:, 5], b['s_seq'][:, 5]), "  (if False, explains h[:,6])")
+    print("h[:,6] changed:    ", not torch.allclose(a['h_seq'][:, 6], b['h_seq'][:, 6]))
+
+    # 4. sizes
+    print("=" * 60)
+    n = lambda m: sum(p.numel() for p in m.parameters())
+    print(f"encoder   {n(wm.encoder):>12,}")
+    print(f"rssm      {n(wm.rssm):>12,}")
+    print(f"predictor {n(wm.predictor):>12,}   (expect 3,024,944)")
+    print(f"reward    {n(wm.reward_head):>12,}")
+    print(f"continue  {n(wm.continue_head):>12,}")
+    print(f"total     {n(wm):>12,}")
+    print("=" * 60)
