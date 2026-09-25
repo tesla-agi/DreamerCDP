@@ -44,8 +44,7 @@ class Config:
     #train
     total_steps:int=100
     warmup_episodes:int=5
-    collect_every:int=10
-    log_every:int=100
+    log_every:int=10
     save_every:int=500
     training_ratio:int=32
     #Predictor

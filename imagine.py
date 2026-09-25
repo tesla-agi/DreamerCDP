@@ -16,34 +16,34 @@ def imagine_rollout(world_model,actor,start_h,start_s,horizon=cfg.horizon):
     action_list=[]
     reward_list=[]
     continue_list=[]
+    with torch.no_grad():
+        for _ in range(horizon):
+            h_list.append(h)
+            s_list.append(s)
 
-    for _ in range(horizon):
-        h_list.append(h)
-        s_list.append(s)
+            action_dist=actor(h,s)
+            action=action_dist.sample()
+            action_list.append(action)
 
-        action_dist=actor(h,s)
-        action=action_dist.sample()
-        action_list.append(action)
+            latent=torch.cat([h,s],dim=-1)
+            reward_bin_logits=world_model.reward_head(latent)
+            reward_prob=F.softmax(reward_bin_logits,dim=-1)
+            reward=world_model.twohot.decode(reward_prob).detach()
+            reward_list.append(reward)
 
-        latent=torch.cat([h,s],dim=-1)
-        reward_bin_logits=world_model.reward_head(latent)
-        reward_prob=F.softmax(reward_bin_logits,dim=-1)
-        reward=world_model.twohot.decode(reward_prob).detach()
-        reward_list.append(reward)
+            continue_logits=world_model.continue_head(latent)
+            continue_=torch.sigmoid(continue_logits).detach().squeeze(-1)
+            continue_list.append(continue_)
 
-        continue_logits=world_model.continue_head(latent)
-        continue_=torch.sigmoid(continue_logits).detach().squeeze(-1)
-        continue_list.append(continue_)
+            h,s,_=world_model.rssm.imagine_step(h,s,action.detach())
 
-        h,s,_=world_model.rssm.imagine_step(h,s,action.detach())
+        h_seq=torch.stack(h_list,dim=0)
+        s_seq=torch.stack(s_list,dim=0)
+        action_seq=torch.stack(action_list,dim=0)
+        reward_seq=torch.stack(reward_list,dim=0)
+        continue_seq=torch.stack(continue_list,dim=0)
 
-    h_seq=torch.stack(h_list,dim=0)
-    s_seq=torch.stack(s_list,dim=0)
-    action_seq=torch.stack(action_list,dim=0)
-    reward_seq=torch.stack(reward_list,dim=0)
-    continue_seq=torch.stack(continue_list,dim=0)
-
-    return {
+        return {
         'h_seq':h_seq,
         's_seq':s_seq,
         'action_seq':action_seq,

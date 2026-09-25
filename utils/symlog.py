@@ -34,11 +34,11 @@ class TwoHot(nn.Module):
         return symexp(dec)
 
 
-
-th=TwoHot()
-v =torch.tensor([-1e4, -3.0, 0.0, 1e-3, 3.0, 1e4])
-enc=th.encode(v)
-print("two nonzero per row?", (enc > 0).sum(-1))
-print("rows sum to 1?     ", enc.sum(-1))
-print("round-trip close?  ", torch.allclose(th.decode(enc), v, atol=1e-4))
-print("max err:           ", (th.decode(enc) - v).abs().max().item())
+if __name__=="__main__":
+    th=TwoHot()
+    v=torch.tensor([-1e4,-3.0,0.0,1e-3,3.0,1e4])
+    enc=th.encode(v)
+    print("two nonzero per row?",(enc>0).sum(-1))
+    print("rows sum to 1?", enc.sum(-1))
+    print("round-trip close?", torch.allclose(th.decode(enc),v, atol=1e-4))
+    print("max err:",(th.decode(enc)-v).abs().max().item())

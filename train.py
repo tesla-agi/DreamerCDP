@@ -85,7 +85,7 @@ def collect_episode(env,wm,actor,buffer,max_steps=cfg.max_steps):
                 break
 
     buffer.add_episode(obs_list,action_list,reward_list,done_list)
-    return sum(reward_list)
+    return sum(reward_list),len(reward_list)
 
 
 def train_wm(buffer,wm,wm_opt):
@@ -128,32 +128,50 @@ def train_actor_critic(buffer,wm,actor,critic,target_critic,a_opt,c_opt):
     update_target(critic,target_critic,cfg.tau)
     return L_actor,L_critic
 
-def train(total_steps=cfg.total_steps,warmup_episodes=cfg.warmup_episodes,
-          collect_every=cfg.collect_every):
+def save_checkpoint():
+    os.makedirs("checkpoint",exist_ok=True)
+    torch.save(wm.state_dict(),"./checkpoint/wm.pth")
+    torch.save(actor.state_dict(),"./checkpoint/actor.pth")
+    torch.save(critic.state_dict(),"./checkpoint/critic.pth")
+
+def train(total_steps=cfg.total_steps,warmup_episodes=cfg.warmup_episodes):
     for _ in range(warmup_episodes):
         collect_episode(env,wm,actor,buffer)
 
+    replay_per_update=cfg.batch_size*cfg.seq_len
     returns_log=[]
+    env_steps=0
+    n_updates=0
+    budget=0.0
     ret=0.0
-    for step in tqdm(range(total_steps)):
-        if step%collect_every==0:
-            ret=collect_episode(env,wm,actor,buffer)
-            returns_log.append(ret)
-        wm_losses=train_wm(buffer,wm,wm_opt)
-        L_actor,L_critic=train_actor_critic(buffer,wm,actor,critic,target_critic,a_opt,
-                                            c_opt)
+    pbar=tqdm(total=total_steps,desc="env_steps")
+    while env_steps<total_steps:
+        ret,length=collect_episode(env,wm,actor,buffer)
+        returns_log.append(ret)
+        env_steps+=length
+        pbar.update(length)
+        budget+=length*cfg.training_ratio/replay_per_update
+        while budget>=1:
+            wm_losses=train_wm(buffer,wm,wm_opt)
+            L_actor,L_critic=train_actor_critic(buffer,wm,actor,critic,target_critic,a_opt,c_opt)
+            budget-=1
+            n_updates+=1
+            if n_updates % cfg.log_every == 0:
+                print(f"upd {n_updates} | env {env_steps} | "
+                      f"wm {wm_losses['total_loss'].item():.2f} | "
+                      f"cos {wm_losses['cos_mean'].item():.3f} | "
+                      f"base {wm_losses['baseline'].item():.3f} | "
+                      f"skill {wm_losses['skill'].item():+.3f} | "
+                      f"rew {wm_losses['reward_loss'].item():.3f} | "
+                      f"kl {wm_losses['kl_dyn'].item():.1f} | "
+                      f"L_a {L_actor.item():.3f} | L_c {L_critic.item():.3f} | "
+                      f"ret {ret:.1f}")
 
-        if step%cfg.log_every==0:
-            print(f"step {step}: wm={wm_losses['total_loss'].item():.2f} "
-                 f"L_a={L_actor.item():.3f} L_c={L_critic.item():.3f} ret={ret:.1f}")
-
-        if step%cfg.save_every==0:
-            os.makedirs("checkpoint",exist_ok=True)
-            torch.save(wm.state_dict(),"./checkpoint/wm.pth")
-            torch.save(actor.state_dict(),"checkpoint/actor.pth")
-            torch.save(critic.state_dict(),"checkpoint/critic.pth")
-
-    return returns_log
+            if n_updates % cfg.save_every == 0:
+                save_checkpoint()
+    pbar.close()
+    save_checkpoint()
+    return returns_log,env_steps,n_updates
 
 
 if __name__ == "__main__":
