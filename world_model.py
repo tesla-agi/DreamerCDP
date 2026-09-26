@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import copy
 from torch.distributions import OneHotCategorical,kl_divergence
 
 from config import *
@@ -8,6 +9,7 @@ from encoder import Encoder
 from heads import RewardHead,ContinueHead,Predictor
 from utils.symlog import TwoHot
 from rssm import RSSM
+from critic import update_target
 
 cfg=Config()
 
@@ -31,6 +33,9 @@ class WorldModel(nn.Module):
 
         self.encoder=Encoder(out_channels=out_channels)
         self.embed_dim=self.encoder.embed_dim
+        self.target_encoder=copy.deepcopy(self.encoder)
+        for p in self.target_encoder.parameters():
+            p.requires_grad=False
         self.rssm=RSSM(a_dim=a_dim,s_dim=self.s_dim,hidden_dim=hidden_dim,
                        embed_dim=self.embed_dim,groups=self.groups,classes=self.classes)
         self.predictor=Predictor(hidden_dim,pred_width,self.embed_dim)
@@ -41,15 +46,15 @@ class WorldModel(nn.Module):
 
     def observe(self,obs_seq,action_seq):
         B=obs_seq.shape[0]
-        T=action_seq.shape[1]
+        T=obs_seq.shape[1]
         device=obs_seq.device
 
-        obs_flat=obs_seq[:,:T].reshape(B*T,64,64,3)
+        obs_flat=obs_seq.reshape(B*T,64,64,3)
         embed_seq=self.encoder(obs_flat).reshape(B,T,self.embed_dim)
 
         a_dim=action_seq.shape[-1]
         zeros_first=torch.zeros(B,1,a_dim,device=device)
-        a_seq_prev=torch.cat([zeros_first,action_seq[:,:-1]],dim=1)
+        a_seq_prev=torch.cat([zeros_first,action_seq],dim=1)
 
         h,s=self.rssm.init_state(B,device=device)
 
@@ -92,25 +97,35 @@ class WorldModel(nn.Module):
 
         }
 
+    @torch.no_grad()
+    def update_target_encoder(self,tau=cfg.enc_tau):
+        update_target(self.encoder,self.target_encoder,tau)
+
     def compute_loss(self,obs_seq,action_seq,reward_seq,continue_seq):
         out=self.observe(obs_seq,action_seq)
 
         #CDP LOSS
-        y=out['embed_seq'].detach()
-        cos_sim=F.cosine_similarity(y,out['pred_embed'],dim=-1)
+        B,T=obs_seq.shape[0],obs_seq.shape[1]
+        with torch.no_grad():
+            y=self.target_encoder(obs_seq.reshape(B*T,64,64,3)).reshape(B,T,self.embed_dim)
+            mu=y.mean(dim=(0,1),keepdim=True)
+        yc=y-mu
+        cos_sim=F.cosine_similarity(yc,out['pred_embed']-mu,dim=-1)
         cos_sim=cos_sim[:,1:]
         cos_mean=cos_sim.mean()
-        baseline = F.cosine_similarity(y, y.mean(dim=(0, 1), keepdim=True), dim=-1)[:, 1:].mean()
+        baseline = F.cosine_similarity(yc, yc.mean(dim=(0, 1), keepdim=True), dim=-1)[:, 1:].mean()
+        persist=F.cosine_similarity(yc[:,1:],yc[:,:-1],dim=-1).mean()
         skill=(cos_mean-baseline).detach()
+        skill_p=(cos_mean-persist).detach()
         cdp_loss=-cos_mean
 
 
 
-        reward_target=self.twohot.encode(reward_seq[:,:-1])
+        reward_target=self.twohot.encode(reward_seq)
         log_prob=F.log_softmax(out['reward_pred'][:,1:],dim=-1)
         reward_loss=-(reward_target*log_prob).sum(-1).mean()
 
-        continue_loss=F.binary_cross_entropy_with_logits(out['continue_pred'][:,1:],continue_seq[:,:-1])
+        continue_loss=F.binary_cross_entropy_with_logits(out['continue_pred'][:,1:],continue_seq)
 
         post=out['posterior_probs']
         prior=out['prior_probs']
@@ -126,12 +141,14 @@ class WorldModel(nn.Module):
             OneHotCategorical(probs=post),
             OneHotCategorical(probs=prior.detach()),
         )
-
-        kl_dyn=torch.clamp(kl_dyn,min=cfg.free_bits).sum(-1).mean()
-        kl_rep=torch.clamp(kl_rep,min=cfg.free_bits).sum(-1).mean()
+        kl_raw=kl_dyn.sum(-1).mean().detach()
+        kl_dyn=torch.clamp(kl_dyn.sum(-1),min=cfg.free_bits).mean()
+        kl_rep=torch.clamp(kl_rep.sum(-1),min=cfg.free_bits).mean()
 
         total_loss=cfg.beta_pred*(reward_loss+continue_loss)+cfg.beta_cdp*cdp_loss\
             +cfg.beta_dyn*kl_dyn+cfg.beta_rep*kl_rep
+        wm_no_cdp=(cfg.beta_pred*(reward_loss+continue_loss)
+                   +cfg.beta_dyn*kl_dyn+cfg.beta_rep*kl_rep).detach()
 
         return {
             'cdp_loss':cdp_loss,
@@ -143,7 +160,11 @@ class WorldModel(nn.Module):
             'total_loss':total_loss,
             'baseline':baseline,
             'skill':skill,
-            'embed':y
+            'embed':y,
+            'kl_raw':kl_raw,
+            'persist':persist,
+            'skill_p':skill_p,
+            'wm_no_cdp':wm_no_cdp,
         }
 
 
@@ -153,7 +174,7 @@ if __name__ == "__main__":
     wm = WorldModel()
     B, T = 4, 10
 
-    obs  = torch.randint(0, 256, (B, T, 64, 64, 3), dtype=torch.uint8)
+    obs  = torch.randint(0, 256, (B, T+1, 64, 64, 3), dtype=torch.uint8)
     act  = F.one_hot(torch.randint(0, cfg.action_dim, (B, T)), cfg.action_dim).float()
     rew  = torch.randn(B, T)
     cont = torch.ones(B, T, 1)

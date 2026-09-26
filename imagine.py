@@ -62,8 +62,15 @@ def lambda_returns(rewards,values,continue_,gamma=cfg.gamma,lam=cfg.lam):
     return torch.stack(returns,dim=0)
 
 
-def compute_S(returns,perc_low=cfg.perc_low,perc_high=cfg.perc_high):
+_ema={'lo':None,'hi':None}
+def compute_S(returns,perc_low=cfg.perc_low,perc_high=cfg.perc_high,decay=0.99):
+    returns=returns.detach()
     lo=torch.quantile(returns,perc_low/100)
     hi=torch.quantile(returns,perc_high/100)
-    S=hi-lo
+    if _ema['lo'] is None:
+        _ema['lo'],_ema['hi']=lo,hi
+    else:
+        _ema['lo']=decay*_ema['lo']+(1-decay)*lo
+        _ema['hi']=decay*_ema['hi']+(1-decay)*hi
+    S=_ema['hi']-_ema['lo']
     return torch.clamp(S,min=1.0)

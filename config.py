@@ -35,21 +35,23 @@ class Config:
     perc_high:int=95
     max_episodes:int=200
     max_steps:int=500
-    enc_lr:float=6e-6
+    enc_lr:float=2e-5
     rssm_p_lr:float=4e-4
     rw_cn_lr:float=4e-5
     a_lr:float=4e-5
     c_lr:float=4e-5
     grad_clip:float=100.0
+    wm_grad_clip:float=1000.0
     #train
     total_steps:int=100
     warmup_episodes:int=5
     log_every:int=10
     save_every:int=500
-    training_ratio:int=32
+    training_ratio:int=128
     #Predictor
     pred_width:int=400
-    beta_cdp:float=1.0
+    beta_cdp:float=500.0
+    enc_tau:float=0.999
 
 
 
