@@ -1,11 +1,11 @@
 # Dreamer-CDP on Crafter
 
-A reconstruction-free DreamerV3: the image decoder is removed, and the world
-model instead learns by **predicting the next frame's embedding** from the
-recurrent state (Dreamer-CDP, [arXiv 2603.07083](https://arxiv.org/abs/2603.07083)).
-Written from scratch in PyTorch and trained online on
-[Crafter](https://github.com/danijar/crafter) (collect -> train world model ->
-train actor-critic in imagination -> collect).
+A from-scratch PyTorch reimplementation of **Dreamer-CDP** (Hauri & Zenke, 2026,
+[arXiv 2603.07083](https://arxiv.org/abs/2603.07083)): DreamerV3 with the pixel
+decoder removed, trained instead to predict an embedding of each frame from the
+recurrent state. Trained online on [Crafter](https://github.com/danijar/crafter)
+(collect -> train world model -> train actor-critic in imagination -> collect)
+on a single Apple-silicon Mac.
 
 ![Dreamer vs Dreamer-CDP](docs/cdp_architecture.jpg)
 
@@ -21,9 +21,60 @@ Crafter and what fixes it** - see [The collapse](#the-collapse) below.
 
 | | |
 |---|---|
-| **From Dreamer-CDP** | no decoder; predictor `h_t -> y_t` (next-frame embedding); negative cosine loss scaled by `beta_cdp = 500`; stop-gradient on the target |
+| **From Dreamer-CDP** | no decoder; predictor `g(h_t)` for the frame's embedding; negative cosine loss; stop-gradient on the target |
 | **From DreamerV3** | RSSM with 32x32 discrete latents + straight-through gradients, 1% unimix, KL balancing (dyn 0.5 / rep 0.1) with free bits 1.0, symlog two-hot reward and critic, percentile return normalisation, REINFORCE actor for discrete actions, LayerNorm + SiLU MLPs, LayerNorm GRU with update bias -1, zero-initialised reward / critic outputs, lambda-returns from the live critic with an EMA-critic regulariser |
-| **Added here** | **centered CDP loss** (target and prediction centered by the batch-mean target, DINO-style), **EMA target encoder** (`enc_tau = 0.999`), a copy-last-frame baseline and effective-rank / KL / encoder-drift monitoring |
+| **Departures from the paper** | **centered CDP loss** (target and prediction centered by the batch-mean target, DINO-style), **EMA target encoder** (`enc_tau = 0.999`), `beta_cdp = 500` instead of 1, training ratio 128 instead of 32 |
+| **Added here** | copy-last-frame baseline, effective-rank / KL / encoder-drift monitoring, multi-seed runner and dashboards |
+
+## Why
+
+DreamerV3 already imagines entirely in latent space: its rollouts never produce
+a pixel. But it learns that latent space by reconstructing pixels, so the
+representation is shaped by what can be redrawn rather than by what can be
+predicted, and in Crafter most of what can be redrawn is grass. Dreamer-CDP
+keeps Dreamer's architecture (the RSSM, imagination, and the actor-critic
+trained inside it) and changes only the training signal. Dreamer supplies the
+architecture; a JEPA-style objective supplies the learning signal.
+
+## What changes relative to DreamerV3
+
+One term of the world-model loss is deleted and one is added.
+
+```text
+DreamerV3     L = −log p(o_t | h_t, s_t)                 + L_reward + L_continue + β_dyn·KL_dyn + β_rep·KL_rep
+this repo     L = −β_cdp · cos( g(h_t) − μ, sg(ē_t) − μ ) + L_reward + L_continue + β_dyn·KL_dyn + β_rep·KL_rep
+```
+
+`ē_t` is the EMA target encoder's embedding of frame `t`, `μ` is its batch mean,
+`sg` is stop-gradient, and `g` is an MLP (`600 → 400 → 400 → 400 → 6144`).
+
+## Design decisions
+
+**The predictor reads `h_t` and nothing else.** `h_t = GRU(h_{t−1}, s_{t−1}, a_{t−1})`
+is computed before frame `t` is observed. The stochastic state `s_t` is sampled
+from the posterior `q(s_t | h_t, e_t)`, so it has already seen the frame, and a
+predictor given `s_t` could read the answer out of its own input. The old
+decoder was allowed `(h_t, s_t)` because its target *was* the frame; the
+predictor's target is derived *from* the frame, so any post-observation input is
+a shortcut. The self-test in `world_model.py` checks this directly: it perturbs
+frame 5 and asserts that `h_5` does not change.
+
+**Cosine rather than L1 or L2.** The target comes from an encoder that is itself
+being trained. Under L1 or L2 the model can lower the loss by shrinking every
+embedding without improving any prediction: scale everything by 0.1 and L2 falls
+100×, while the prediction points exactly as wrong as before. Cosine is
+scale-invariant, which closes that path. I-JEPA and V-JEPA close the same
+loophole from the other side, by normalizing the target and then using L2 or L1.
+
+**Centering and an EMA target, not two timescales alone.** The paper prevents
+collapse with two learning rates (fast RSSM and predictor, very slow encoder).
+Here that kept the encoder almost frozen at `enc_lr 6e-6`, and any faster
+encoder collapsed; see [The collapse](#the-collapse). Centering removes the
+shortcut that caused it, and the EMA target keeps the targets stable while the
+encoder learns at `2e-5`.
+
+**The first step of each sequence is excluded** from the CDP loss, because `h_0`
+comes from the initial state and has seen nothing yet.
 
 ## Setup
 
@@ -119,6 +170,27 @@ One line every 10 updates. The columns that matter:
 
 `wm` is dominated by `500 x -cos`, so it goes strongly negative; `wm_nocdp` is
 the rest of the world-model loss on its own.
+
+## Getting the first version to learn
+
+The first working version (training ratio 32, `beta_cdp` 1) did not learn at all:
+`skill` stayed at 0.000 with `base` at 0.98, and return went 1.59 -> 1.28. Three
+bugs explained most of it:
+
+- **Per-group free bits.** 32 latent groups each got a 1-nat floor, 32 nats in
+  total, while the real KL was about 10 nats, so both KL terms sent zero
+  gradient and the prior, which imagination runs on, was never trained. Free
+  bits now apply to the total KL.
+- **ReLU encoder with no normalization.** Every embedding entry was positive, so
+  all frames shared one dominant direction, which is why `base` sat at 0.98. The
+  encoder now uses GroupNorm, SiLU and centered pixels.
+- **Reward alignment.** The reward head was asked to predict the reward of an
+  action it had not yet seen. Rewards and continues are now attached to the
+  state that observes their outcome.
+
+With those fixed (plus survival-weighted actor and critic losses, smoothed
+return normalization and a world-model gradient clip of 1000), and with training
+ratio 128 and `beta_cdp` 500, `skill` reached +0.34 and return 1.59 -> 2.51.
 
 ## The collapse
 
@@ -236,3 +308,10 @@ models**: a deterministic predictor trained with a regression loss converges to
 the conditional mean, and at a stochastic branch point that mean is a latent
 that corresponds to no reachable state. The question is whether that breaks
 policy learning in imagination, and by how much.
+
+## References
+
+- Hauri & Zenke (2026). *Dreamer-CDP: Improving Reconstruction-free World Models via Continuous Deterministic Representation Prediction.* arXiv:2603.07083.
+- Hafner et al. (2023). *Mastering Diverse Domains through World Models* (DreamerV3).
+- Tang et al. (2023). *Understanding Self-Predictive Learning for Reinforcement Learning.*
+- Hafner (2021). *Benchmarking the Spectrum of Agent Capabilities* (Crafter).
