@@ -1,218 +1,136 @@
-# Dreamer-CDP on Crafter
+"""
+Turn saved dreamer-cdp training logs into the figures used in the README.
 
-A reconstruction-free DreamerV3: the image decoder is removed, and the world
-model instead learns by **predicting the next frame's embedding** from the
-recurrent state (Dreamer-CDP, [arXiv 2603.07083](https://arxiv.org/abs/2603.07083)).
-Written from scratch in PyTorch and trained online on
-[Crafter](https://github.com/danijar/crafter) (collect -> train world model ->
-train actor-critic in imagination -> collect).
+Save a run's output while it trains:
+    caffeinate -i python train.py | tee runs/my_run.txt
 
-The interesting part is not the architecture but **why it collapses on
-Crafter and what fixes it** - see [The collapse](#the-collapse) below.
+Then plot one or more runs, each as path or path:label:
+    python plot_log.py runs/first.txt:"first version" runs/fixed.txt:"V3 fixes" --out docs
 
-## What is from the paper and what is not
+Writes docs/forecasting.png, docs/representation.png and docs/returns.png.
+"""
+import argparse
+import os
+import re
 
-| | |
-|---|---|
-| **From Dreamer-CDP** | no decoder; predictor `h_t -> y_t` (next-frame embedding); negative cosine loss scaled by `beta_cdp = 500`; stop-gradient on the target |
-| **From DreamerV3** | RSSM with 32x32 discrete latents + straight-through gradients, 1% unimix, KL balancing (dyn 0.5 / rep 0.1) with free bits 1.0, symlog two-hot reward and critic, percentile return normalisation, REINFORCE actor for discrete actions, LayerNorm + SiLU MLPs, LayerNorm GRU with update bias -1, zero-initialised reward / critic outputs, lambda-returns from the live critic with an EMA-critic regulariser |
-| **Added here** | **centered CDP loss** (target and prediction centered by the batch-mean target, DINO-style), **EMA target encoder** (`enc_tau = 0.999`), a copy-last-frame baseline and effective-rank / KL / encoder-drift monitoring |
+import numpy as np
+import matplotlib
 
-## Setup
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
-Conda env `dreamer`, Python 3.11: `torch 2.13`, `crafter 1.8.3`,
-`numpy 1.26.4`, `gym 0.25.2`, `tqdm`.
+KEYS = {"upd", "env", "wm", "cos", "base", "skill", "rew", "kl",
+        "L_a", "L_c", "ret", "erank", "klraw", "gnorm"}
+PAIR = re.compile(r"([A-Za-z_]+)\s+([-+]?\d+(?:\.\d+)?)")
+COLORS = ["#1F5FAD", "#E8590C", "#6741D9", "#495057"]
 
-**Do not upgrade gym or numpy.** Crafter and `train.py` use the old 4-tuple
-`step()` API that gym 0.26 rejects, and gym 0.25 breaks on numpy 2.
 
-```bash
-conda create -n dreamer python=3.11
-conda activate dreamer
-pip install torch crafter==1.8.3 numpy==1.26.4 gym==0.25.2 tqdm
-```
+def parse(path):
+    """Read the 'upd ... | env ... | ...' lines from a train.py log.
 
-Runs on Apple `mps` if available, otherwise CPU.
+    Handles lines where a tqdm progress bar is printed in front of the log line,
+    and lines the terminal wrapped onto a second row.
+    """
+    rows = []
+    with open(path, errors="ignore") as f:
+        for line in f:
+            i = line.find("upd ")
+            if i >= 0:
+                rec = {k: float(v) for k, v in PAIR.findall(line[i:]) if k in KEYS}
+                if "upd" in rec and "env" in rec:
+                    rows.append(rec)
+            elif rows:
+                extra = {k: float(v) for k, v in PAIR.findall(line) if k in KEYS}
+                for k, v in extra.items():
+                    rows[-1].setdefault(k, v)
+    if not rows:
+        raise SystemExit(f"no 'upd ... | env ...' log lines found in {path}")
+    keys = set().union(*rows)
+    return {k: np.array([r.get(k, np.nan) for r in rows]) for k in keys}
 
-## Layout
 
-```
-config.py           every hyperparameter (one dataclass)
-encoder.py          4-layer CNN, 64x64x3 -> 6144-d embedding
-rssm.py             input projection + GRU + prior / posterior (32x32 categorical)
-GRU.py              LayerNorm GRU
-heads.py            reward head, continue head, CDP predictor
-world_model.py      observe(), centered CDP loss, KL, reward / continue losses
-                    + self-test (gradient routing, time alignment, sizes)
-actor.py            categorical policy over 17 Crafter actions
-critic.py           two-hot critic + EMA target update
-imagine.py          imagined rollouts, lambda-returns, percentile scale
-losses.py           actor / critic losses + self-test
-replay_buffer.py    episode buffer, sequence sampling
-train.py            online training loop
-random_baseline.py  random-policy return and Crafter score
-utils/
-  mlp.py            Linear -> LayerNorm -> SiLU blocks
-  distributions.py  unimix, straight-through sampling
-  symlog.py         symlog / symexp, two-hot encoding
-  crafter_eval.py   Crafter score (geometric mean of achievement rates)
-run_seeds.sh        seeds 0 1 2 back to back, then a summary
-summarize_seeds.py  mean +- std across seeds from results.json
-watch_runs.py       live status + collapse warnings
-viz_runs.py         HTML dashboard of all training curves
-```
+def smooth(y, k):
+    """Moving average that ignores NaNs; k=1 returns the input."""
+    if k <= 1:
+        return y
+    out = np.full_like(y, np.nan, dtype=float)
+    for i in range(len(y)):
+        w = y[max(0, i - k + 1): i + 1]
+        w = w[~np.isnan(w)]
+        if len(w):
+            out[i] = w.mean()
+    return out
 
-## Run it
 
-```bash
-python world_model.py       # self-test: finite losses, gradient routing, h_t never sees frame t
-python losses.py            # self-test: actor / critic gradients go where they should
+def style(ax, title, xlabel, ylabel):
+    ax.set_title(title, fontsize=11, loc="left")
+    ax.set_xlabel(xlabel, fontsize=9)
+    ax.set_ylabel(ylabel, fontsize=9)
+    ax.tick_params(labelsize=8)
+    ax.grid(alpha=0.25, linewidth=0.6)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
 
-./run_seeds.sh              # 3 seeds x 50k env steps -> checkpoint_v3arch_seed{0,1,2}/
-./run_seeds.sh 3 4          # other seeds
-STEPS=10000 ./run_seeds.sh  # shorter runs
-```
 
-A single run is `SEED=0 RUN_DIR=checkpoint_test STEPS=50000 python train.py`.
-Each run directory gets `train.log`, `wm.pth`, `actor.pth`, `critic.pth` and
-`results.json` (every episode return, first / last fifth, best, Crafter score,
-achievement rates). Checkpoints are saved every 500 updates.
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("logs", nargs="+", help="log file, optionally path:label")
+    ap.add_argument("--out", default="docs", help="output folder")
+    ap.add_argument("--smooth", type=int, default=10, help="moving-average window, in log lines")
+    args = ap.parse_args()
+    os.makedirs(args.out, exist_ok=True)
 
-Training ratio is 128 replayed steps per env step (batch 16 x length 50), so
-50k env steps is ~8,000 updates, about 3 h on an M-series GPU.
+    runs = []
+    for spec in args.logs:
+        path, _, label = spec.partition(":")
+        runs.append((label or os.path.splitext(os.path.basename(path))[0], parse(path)))
 
-```bash
-python random_baseline.py                          # reference: random policy
-python summarize_seeds.py checkpoint_v3arch_seed*  # table + mean +- std
-```
+    # 1. forecasting: cos against the lazy baseline, and skill
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(10, 3.6), dpi=160)
+    for c, (label, d) in zip(COLORS, runs):
+        a1.plot(d["upd"], smooth(d["cos"], args.smooth), color=c, lw=1.6, label=f"{label}: cos")
+        a1.plot(d["upd"], smooth(d["base"], args.smooth), color=c, lw=1.2, ls="--", label=f"{label}: base")
+        a2.plot(d["upd"], smooth(d["skill"], args.smooth), color=c, lw=1.6, label=label)
+    a2.axhline(0, color="#868E96", lw=0.8)
+    style(a1, "Prediction vs. the lazy baseline", "update", "cosine")
+    style(a2, "Skill = cos − base", "update", "skill")
+    a1.legend(fontsize=7, frameon=False)
+    a2.legend(fontsize=8, frameon=False)
+    fig.tight_layout()
+    fig.savefig(os.path.join(args.out, "forecasting.png"))
+    plt.close(fig)
 
-## Watching a run
+    # 2. representation: effective rank of embeddings, and information entering the state
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(10, 3.6), dpi=160)
+    for c, (label, d) in zip(COLORS, runs):
+        if "erank" in d:
+            a1.plot(d["upd"], smooth(d["erank"], args.smooth), color=c, lw=1.6, label=label)
+        if "klraw" in d:
+            a2.plot(d["upd"], smooth(d["klraw"], args.smooth), color=c, lw=1.6, label=label)
+    style(a1, "Effective rank of embeddings", "update", "effective rank")
+    style(a2, "KL(posterior ‖ prior) before free bits", "update", "nats")
+    for ax in (a1, a2):
+        if ax.lines:
+            ax.legend(fontsize=8, frameon=False)
+    fig.tight_layout()
+    fig.savefig(os.path.join(args.out, "representation.png"))
+    plt.close(fig)
 
-```bash
-python watch_runs.py        # status of every seed, once
-python watch_runs.py -f     # refresh every 30 s
-python viz_runs.py -f       # HTML dashboard, regenerated every 60 s
-```
+    # 3. returns: 'ret' is the return of the most recent episode at each log line
+    fig, ax = plt.subplots(figsize=(6, 3.6), dpi=160)
+    for c, (label, d) in zip(COLORS, runs):
+        ax.plot(d["env"], smooth(d["ret"], max(args.smooth, 20)), color=c, lw=1.6, label=label)
+    style(ax, "Episode return, smoothed", "environment steps", "return")
+    ax.legend(fontsize=8, frameon=False)
+    fig.tight_layout()
+    fig.savefig(os.path.join(args.out, "returns.png"))
+    plt.close(fig)
 
-Both only read `train.log`, so they never touch the training process.
+    for label, d in runs:
+        print(f"{label}: {len(d['upd'])} log lines, last update {int(d['upd'][-1])}, "
+              f"last env step {int(d['env'][-1])}")
+    print(f"wrote forecasting.png, representation.png, returns.png to {args.out}/")
 
-## Reading the training log
 
-One line every 10 updates. The columns that matter:
-
-| column | meaning | healthy | broken |
-|---|---|---|---|
-| `cos` | cosine(predicted, target), centered | rises, plateaus well above 0 | ~0 |
-| `skill` | `cos - base`, gain over predicting the mean embedding | clearly > 0 | ~0: predictor outputs the average |
-| `skill_p` | `cos - persist`, gain over copying the last frame | the real test, > 0 is the goal | see [Limitations](#limitations) |
-| `erank` | effective rank of the target embeddings | ~100-250 | falls toward 1 |
-| `klraw` | KL(posterior \|\| prior) before free bits | a few nats | < 1: the posterior has stopped reading the image |
-| `drift` | relative encoder weight change from init | rises smoothly | frozen: the encoder is not learning |
-| `gnorm` | world-model gradient norm (clip 1000) | tens to hundreds | sustained > 1000 |
-
-`wm` is dominated by `500 x -cos`, so it goes strongly negative; `wm_nocdp` is
-the rest of the world-model loss on its own.
-
-## The collapse
-
-Without a decoder nothing forces the latent to describe the image, and on
-Crafter the naive CDP loss finds a shortcut.
-
-| run | what happened |
-|---|---|
-| `enc_lr 6e-6`, 10k | no collapse, but the encoder barely moves (drift 0.013); predictor loses to copy-last-frame; score 1.80% vs random 1.46% |
-| `enc_lr 1e-4` | collapse by update ~590 |
-| + EMA target, `tau 0.99` | still collapses, by update 160 - EMA alone is not the fix |
-| + EMA target, `tau 0.999` | targets stay healthy (erank ~135) but the **posterior ignores the image** by update 130 (klraw 0.3); predictor outputs the mean embedding |
-
-**Root cause, measured on real Crafter frames:** the raw embeddings share so
-much HUD and terrain content that *predicting the average embedding* already
-scores a cosine of **0.97** with a random encoder and **0.82** with a trained
-one. The cosine loss is ~97% satisfiable while ignoring the observation, and
-any encoder learning rate fast enough to matter falls into that.
-
-**Fix:** center both target and prediction by the batch-mean target before the
-cosine (`world_model.py`, `compute_loss`). The mean embedding then scores 0, and
-the only way to earn cosine is to predict what is specific to this frame. With
-centering (`enc_lr 2e-5`, `tau 0.999`) no run has collapsed: klraw stays
-above free bits and erank stays in the hundreds.
-
-## Results
-
-### Current backbone, 3 seeds x 50k env steps
-
-| seed | episodes | first-fifth return | last-fifth return | best | Crafter score | `skill_p`, last 20% of updates |
-|---|---|---|---|---|---|---|
-| 0 | 288 | 1.42 | 3.40 | 6.10 | 2.40% | +0.028 |
-| 1 | 279 | 1.94 | 3.39 | 6.10 | 2.83% | +0.024 |
-| 2 | 299 | 1.32 | 3.34 | 7.10 | 2.46% | -0.006 |
-| **mean +- std** | | **1.56 +- 0.33** | **3.38 +- 0.03** | **6.43 +- 0.58** | **2.57 +- 0.23%** | |
-
-Random policy (300 episodes, same 500-step cap): return 1.31 +- 0.07 (standard error), Crafter score 1.46%.
-
-Every seed ends at ~2.6x the random return, and the three final returns agree
-to within 0.06. No run collapsed.
-
-Achievement rates (% of episodes, seeds 0 / 1 / 2):
-
-| achievement | 0 | 1 | 2 |
-|---|---|---|---|
-| wake_up | 95.1 | 90.3 | 92.3 |
-| collect_sapling | 83.3 | 79.2 | 80.3 |
-| place_plant | 81.2 | 70.6 | 75.9 |
-| collect_wood | 40.3 | 55.9 | 44.8 |
-| collect_drink | 44.1 | 48.0 | 21.4 |
-| place_table | 3.8 | 20.1 | 11.0 |
-| eat_cow | 6.9 | 6.1 | 8.7 |
-| defeat_zombie | 6.9 | 2.5 | 5.4 |
-| make_wood_pickaxe | - | 1.8 | 0.7 |
-| defeat_skeleton | 0.3 | 0.7 | - |
-| collect_stone | - | 0.4 | - |
-| make_wood_sword | - | 0.4 | - |
-
-**Predictor vs copy-last-frame.** With the earlier backbone `skill_p` never
-went above 0. With the current one it crosses 0 in two of three seeds (seeds 0
-and 1, positive on ~90% of logged updates in the last fifth of training) and
-ends at ~0 in the third. The predictor now roughly matches copying the last
-frame and beats it in most runs, but the margin is small.
-
-### Earlier backbone, single seed (for reference)
-
-Before the DreamerV3-style layer changes (plain GRU, ReLU / ELU MLPs without
-LayerNorm, target-critic returns). **Not directly comparable** to the table above.
-
-| run | last-fifth return | best | Crafter score |
-|---|---|---|---|
-| uncentered, 50k | 2.51 | 5.10 | - |
-| centered, 10k | - | - | 1.90% |
-| centered, 50k | 2.71 | 5.10 | 2.09% |
-
-Centered 50k achievement rates: wake_up 95%, collect_sapling 74%,
-place_plant 70%, collect_wood 27%, collect_drink 16%, eat_cow 6%,
-defeat_zombie 5%, place_table 2.1%, make_wood_sword 0.3%.
-
-## Limitations
-
-- **50k env steps, not 1M.** Crafter results are normally reported at 1M
-  steps (DreamerV3 ~14-15%). These runs are 5% of that budget, so the absolute
-  score says little; the point is stability and the comparison to random.
-- **The margin over copy-last-frame is small** (`skill_p` about +0.03 in two
-  seeds, about 0 in the third). Part of this is structural: the copy baseline
-  uses the full 6144-d embedding of frame t-1, while the predictor only sees
-  frame t-1 through the 1024-bit discrete state `s_{t-1}`. The DreamerV3-style
-  backbone was enough to close most of that gap, not all of it.
-- **Three seeds.** Enough to show the result is stable, not enough for tight
-  error bars on the Crafter score.
-- **No pixels from imagination.** There is no decoder, so dreams exist only as
-  embeddings. Showing them needs a separate probe decoder trained on the frozen
-  latents.
-- Episodes are capped at 500 steps (Crafter's own limit is 10,000); the cap is
-  not stored as a termination.
-
-## Next
-
-This repo is the baseline for a study of **mode-averaging in latent world
-models**: a deterministic predictor trained with a regression loss converges to
-the conditional mean, and at a stochastic branch point that mean is a latent
-that corresponds to no reachable state. The question is whether that breaks
-policy learning in imagination, and by how much.
+if __name__ == "__main__":
+    main()
