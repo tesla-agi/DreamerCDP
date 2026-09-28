@@ -1,20 +1,17 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+from config import *
+from utils.mlp import MLP
 
+cfg=Config()
 class Critic(nn.Module):
-    def __init__(self,latent_dim=1624,hidden_dim=400):
+    def __init__(self,latent_dim=cfg.latent_dim,hidden_dim=cfg.ac_hidden_dim):
         super(Critic,self).__init__()
-
-        self.fc1=nn.Linear(latent_dim,hidden_dim)
-        self.fc2=nn.Linear(hidden_dim,hidden_dim)
-        self.fc3=nn.Linear(hidden_dim,255)
+        self.net=MLP(latent_dim,cfg.num_bins,hidden_dim,layers=2,zero_init=True)
 
     def forward(self,h,s):
         latent=torch.cat([h,s],dim=-1)
-        x=F.relu(self.fc1(latent))
-        x=F.relu(self.fc2(x))
-        x=self.fc3(x)
+        x=self.net(latent)
         return x
 
 

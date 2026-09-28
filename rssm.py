@@ -3,6 +3,7 @@ import torch.nn as nn
 from config import *
 from GRU import GRU
 from utils.distributions import unimix,sample_ste
+from utils.mlp import MLP
 
 cfg=Config()
 class RSSM(nn.Module):
@@ -15,19 +16,14 @@ class RSSM(nn.Module):
         self.groups=groups
         self.classes=classes
 
-        self.gru=GRU(s_dim+a_dim,hidden_dim)
-        self.posterior_net=nn.Sequential(
-            nn.Linear(hidden_dim+embed_dim,hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim,s_dim)
+        self.img_in=nn.Sequential(
+            nn.Linear(s_dim+a_dim,hidden_dim,bias=False),
+            nn.LayerNorm(hidden_dim),
+            nn.SiLU()
         )
-
-        self.prior_net=nn.Sequential(
-            nn.Linear(hidden_dim,hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim,s_dim)
-
-        )
+        self.gru=GRU(hidden_dim,hidden_dim)
+        self.posterior_net=MLP(hidden_dim+embed_dim,s_dim,hidden_dim,layers=1)
+        self.prior_net=MLP(hidden_dim,s_dim,hidden_dim,layers=1)
 
     def init_state(self,batch,device):
         h_prev=torch.zeros(batch,self.hidden_dim,device=device)
@@ -35,7 +31,7 @@ class RSSM(nn.Module):
         return h_prev,s_prev
 
     def obs_step(self,h_prev,s_prev,a_prev,obs_embed):
-        gru_input=torch.cat([s_prev,a_prev],dim=-1)
+        gru_input=self.img_in(torch.cat([s_prev,a_prev],dim=-1))
         h_t=self.gru(gru_input,h_prev)
         posterior_input=torch.cat([h_t,obs_embed],dim=-1)
         posterior_logits=self.posterior_net(posterior_input)
@@ -46,7 +42,7 @@ class RSSM(nn.Module):
         return h_t,s_t,posterior_prob,prior_prob
 
     def imagine_step(self,h_prev,s_prev,a_prev):
-        gru_input=torch.cat([s_prev,a_prev],dim=-1)
+        gru_input=self.img_in(torch.cat([s_prev,a_prev],dim=-1))
         h_t=self.gru(gru_input,h_prev)
         prior_logits=self.prior_net(h_t)
         prior_prob=unimix(prior_logits,self.groups,self.classes,alpha=0.01)

@@ -52,6 +52,7 @@ class Config:
     pred_width:int=400
     beta_cdp:float=500.0
     enc_tau:float=0.999
+    critic_reg:float=1.0
 
 
 

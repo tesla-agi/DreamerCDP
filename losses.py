@@ -13,28 +13,29 @@ def compute_loss(world_model,actor,critic,target_critic,two_hot,rollout,entropy_
     continue_seq=rollout['continue_seq']
 
     v_target_logits=target_critic(h_seq,s_seq)
-    v_target=two_hot.decode(F.softmax(v_target_logits,dim=-1))
 
     v_live_logits=critic(h_seq,s_seq)
     v_live=two_hot.decode(F.softmax(v_live_logits,dim=-1))
 
-    r_lam=lambda_returns(reward_seq,v_target,continue_seq,lam=lam)
+    r_lam=lambda_returns(reward_seq,v_live.detach(),continue_seq,lam=lam)
 
     with torch.no_grad():
         w=torch.cumprod(torch.cat([torch.ones_like(continue_seq[:1]),cfg.gamma*continue_seq[1:]],dim=0),dim=0)   #(H,B)
+    w=w[:-1]
 
     #Actor Loss
-    a_dist=actor(h_seq,s_seq)
-    log_prob=a_dist.log_prob(action_seq)
+    a_dist=actor(h_seq[:-1],s_seq[:-1])
+    log_prob=a_dist.log_prob(action_seq[:-1])
     entropy=a_dist.entropy()
-    S=compute_S(r_lam,perc_low=cfg.perc_low,perc_high=cfg.perc_high)
-    advantage=((r_lam-v_live)/S).detach().squeeze(-1)
+    S=compute_S(r_lam[:-1],perc_low=cfg.perc_low,perc_high=cfg.perc_high)
+    advantage=((r_lam[:-1]-v_live[:-1])/S).detach().squeeze(-1)
     L_actor=-(w*(log_prob*advantage+entropy_coef*entropy)).mean()
 
     #Critic Loss
-    v_target_bins=two_hot.encode(r_lam.detach())
-    log_probs=F.log_softmax(v_live_logits,dim=-1)
-    L_critic=-(w*(v_target_bins*log_probs).sum(-1)).mean()
+    v_target_bins=two_hot.encode(r_lam[:-1].detach())
+    v_reg_bins=F.softmax(v_target_logits[:-1],dim=-1).detach()
+    log_probs=F.log_softmax(v_live_logits[:-1],dim=-1)
+    L_critic=-(w*((v_target_bins+cfg.critic_reg*v_reg_bins)*log_probs).sum(-1)).mean()
 
     return L_actor,L_critic
 

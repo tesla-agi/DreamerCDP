@@ -5,6 +5,8 @@ import os
 import gym
 import crafter
 import numpy as np
+import json
+import random
 
 from world_model import WorldModel,effective_rank
 from actor import Actor
@@ -17,6 +19,13 @@ from utils.crafter_eval import crafter_score
 from config import *
 
 cfg=Config()
+
+seed=int(os.environ.get("SEED",0))
+run_dir=os.environ.get("RUN_DIR","checkpoint")
+total_env_steps=int(os.environ.get("STEPS",50000))
+random.seed(seed)
+np.random.seed(seed)
+torch.manual_seed(seed)
 
 wm=WorldModel(hidden_dim=cfg.hidden_dim,
               a_dim=cfg.action_dim,
@@ -41,7 +50,7 @@ for p in target_critic.parameters():
 
 buffer=ReplayBuffer(obs_shape=(64,64,3),max_episodes=cfg.max_episodes,max_steps=cfg.max_steps)
 
-env=gym.make("CrafterReward-v1")
+env=gym.make("CrafterReward-v1",seed=seed)
 
 wm_opt = torch.optim.Adam([
     {"params": wm.encoder.parameters(),"lr": cfg.enc_lr},
@@ -51,7 +60,7 @@ wm_opt = torch.optim.Adam([
 
 sizes = [sum(p.numel() for p in g["params"]) for g in wm_opt.param_groups]
 print("param groups:", sizes, "total:", sum(sizes))
-assert sizes == [1_552_752, 11_618_992, 2_044_256], sizes
+assert sizes == [1_552_752, 11_455_192, 2_046_656], sizes
 assert sum(sizes) == sum(p.numel() for p in wm.parameters() if p.requires_grad), "a parameter is missing from the optimizer"
 
 a_opt=torch.optim.Adam(actor.parameters(),lr=cfg.a_lr)
@@ -142,10 +151,10 @@ def train_actor_critic(buffer,wm,actor,critic,target_critic,a_opt,c_opt):
     return L_actor,L_critic
 
 def save_checkpoint():
-    os.makedirs("checkpoint",exist_ok=True)
-    torch.save(wm.state_dict(),"./checkpoint/wm.pth")
-    torch.save(actor.state_dict(),"./checkpoint/actor.pth")
-    torch.save(critic.state_dict(),"./checkpoint/critic.pth")
+    os.makedirs(run_dir,exist_ok=True)
+    torch.save(wm.state_dict(),os.path.join(run_dir,"wm.pth"))
+    torch.save(actor.state_dict(),os.path.join(run_dir,"actor.pth"))
+    torch.save(critic.state_dict(),os.path.join(run_dir,"critic.pth"))
 
 def train(total_steps=cfg.total_steps,warmup_episodes=cfg.warmup_episodes):
     for _ in range(warmup_episodes):
@@ -198,7 +207,7 @@ def train(total_steps=cfg.total_steps,warmup_episodes=cfg.warmup_episodes):
 
 
 if __name__ == "__main__":
-    returns_log, unlock_log, env_steps, n_updates = train(total_steps=50000)
+    returns_log, unlock_log, env_steps, n_updates = train(total_steps=total_env_steps)
 
     ratio = n_updates * cfg.batch_size * cfg.seq_len / max(env_steps, 1)
     n = len(returns_log)
@@ -216,3 +225,17 @@ if __name__ == "__main__":
     for k,v in sorted(rates.items(),key=lambda x:-x[1]):
         if v>0: print(f"  {k:22s} {v:5.1f}%")
     print("=" * 40)
+
+    with open(os.path.join(run_dir,"results.json"),"w") as f:
+        json.dump({
+            "seed":seed,
+            "env_steps":env_steps,
+            "updates":n_updates,
+            "episodes":n,
+            "returns":[float(r) for r in returns_log],
+            "first_fifth":float(np.mean(returns_log[:n//5])) if n>=5 else None,
+            "last_fifth":float(np.mean(returns_log[n//5*4:])) if n>=5 else None,
+            "best":float(max(returns_log)),
+            "crafter_score":float(score),
+            "achievements":rates,
+        },f,indent=2)

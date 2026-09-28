@@ -215,7 +215,7 @@ if __name__ == "__main__":
     n = lambda m: sum(p.numel() for p in m.parameters())
     print(f"encoder   {n(wm.encoder):>12,}")
     print(f"rssm      {n(wm.rssm):>12,}")
-    print(f"predictor {n(wm.predictor):>12,}   (expect 3,024,944)")
+    print(f"predictor {n(wm.predictor):>12,}   (expect 3,026,144)")
     print(f"reward    {n(wm.reward_head):>12,}")
     print(f"continue  {n(wm.continue_head):>12,}")
     print(f"total     {n(wm):>12,}")

@@ -11,7 +11,7 @@ def unimix(logits,groups,classes,alpha=0.01):
     return mixed
 
 
-def sample_ste(probs):
+def sample_ste(probs):                                      #Straight through estimator
     dist=OneHotCategorical(probs=probs)
     hard=dist.sample()
     sample=hard+probs-probs.detach()
