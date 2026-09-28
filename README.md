@@ -7,6 +7,13 @@ Written from scratch in PyTorch and trained online on
 [Crafter](https://github.com/danijar/crafter) (collect -> train world model ->
 train actor-critic in imagination -> collect).
 
+![Dreamer vs Dreamer-CDP](docs/cdp_architecture.jpg)
+
+*Left: Crafter. Right: Dreamer reconstructs the frame x_t from the latent
+(L_recon); Dreamer-CDP drops the decoder and instead predicts the frame's
+embedding u_t from the recurrent state h_t (L_CDP). Figure from
+[arXiv 2603.07083](https://arxiv.org/abs/2603.07083).*
+
 The interesting part is not the architecture but **why it collapses on
 Crafter and what fixes it** - see [The collapse](#the-collapse) below.
 
@@ -137,6 +144,11 @@ the only way to earn cosine is to predict what is specific to this frame. With
 centering (`enc_lr 2e-5`, `tau 0.999`) no run has collapsed: klraw stays
 above free bits and erank stays in the hundreds.
 
+![Effective rank and KL, 3 seeds](docs/fig_health.png)
+
+*Effective rank of the targets climbs from ~100 to ~250 and raw KL stays well
+above free bits (dashed) for the whole run, in all three seeds.*
+
 ## Results
 
 ### Current backbone, 3 seeds x 50k env steps
@@ -152,6 +164,8 @@ Random policy (300 episodes, same 500-step cap): return 1.31 +- 0.07 (standard e
 
 Every seed ends at ~2.6x the random return, and the three final returns agree
 to within 0.06. No run collapsed.
+
+![Episode return, 3 seeds](docs/fig_return.png)
 
 Achievement rates (% of episodes, seeds 0 / 1 / 2):
 
@@ -175,6 +189,12 @@ went above 0. With the current one it crosses 0 in two of three seeds (seeds 0
 and 1, positive on ~90% of logged updates in the last fifth of training) and
 ends at ~0 in the third. The predictor now roughly matches copying the last
 frame and beats it in most runs, but the margin is small.
+
+![Skill vs mean embedding and vs copy-last-frame](docs/fig_skill.png)
+
+*Left: gain over predicting the mean embedding, far from 0 in every seed, so
+nothing collapsed to the average. Right: gain over copying the last frame,
+crossing the dashed 0 line late in training.*
 
 ### Earlier backbone, single seed (for reference)
 

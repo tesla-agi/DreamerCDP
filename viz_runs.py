@@ -134,7 +134,7 @@ METRICS.forEach(m=>{
  const X=v=>M.l+(v/xmax)*(W-M.l-M.r),Y=v=>M.t+(1-(v-lo)/(hi-lo))*(H-M.t-M.b);
  let g="";
  ticks(lo,hi,4).forEach(v=>{g+=`<line x1="${M.l}" x2="${W-M.r}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--grid)"/><text x="${M.l-6}" y="${Y(v)+3.5}" text-anchor="end">${fmtY(v,m.f)}</text>`});
- ticks(0,xmax,5).forEach(v=>{g+=`<text x="${X(v)}" y="${H-6}" text-anchor="middle">${fmtX(v)}</text>`});
+ ticks(0,xmax,5).filter(v=>X(v)<W-M.r-20).forEach(v=>{g+=`<text x="${X(v)}" y="${H-6}" text-anchor="middle">${fmtX(v)}</text>`});
  g+=`<text x="${W-M.r}" y="${H-6}" text-anchor="start" dx="4">updates</text>`;
  g+=`<line x1="${M.l}" x2="${W-M.r}" y1="${H-M.b}" y2="${H-M.b}" stroke="var(--axis)"/>`;
  if(m.ref!=null)g+=`<line x1="${M.l}" x2="${W-M.r}" y1="${Y(m.ref)}" y2="${Y(m.ref)}" stroke="var(--ink2)" stroke-dasharray="4 3" stroke-width="1"/>`+(m.refl?`<text x="${W-M.r+4}" y="${Y(m.ref)+3.5}">${m.refl}</text>`:"");
